@@ -291,6 +291,8 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
         mcp_transport_type: str = "StreamableHttpTransport"
         mcp_executable: Optional[str] = None
         mcp_port: int = 8000
+        mcp_url: Optional[str] = None
+        skip_mcp_check: bool = False
 
         # Search configuration
         number_documents_to_search: int = 10
@@ -318,35 +320,49 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
         console.print(Panel.fit("🔍 Service Check", style="bold cyan"))
         console.print()
 
-        # Check MCP server
-        mcp_port = getattr(cfg, "mcp_port", 8000)
-        if not check_port(mcp_port):
-            console.print(
-                f"[yellow]⚠[/yellow]  MCP server is not running on port [bold]{mcp_port}[/bold]"
-            )
-            if Confirm.ask("Launch MCP server?"):
-                process = launch_mcp_server(mcp_port, self.logger)
-                if process:
-                    self._launched_processes.append(process)
-                    console.print(
-                        f"[green]✓[/green]  MCP server launched on port {mcp_port}"
-                    )
-                else:
-                    console.print(
-                        "[red]✗[/red]  Failed to start MCP server", style="bold red"
-                    )
-                    raise RuntimeError(
-                        "Failed to start MCP server. Please launch it manually."
-                    )
+        # Check whether to skip MCP check 
+        skip_mcp_check = getattr(cfg, "skip_mcp_check", False)
+
+        if skip_mcp_check:
+            mcp_url = getattr(cfg, "mcp_url", None)
+            if mcp_url:
+                console.print(
+                    f"[green]✓[/green]  Using external MCP server: [bold]{mcp_url}[/bold]"
+                )
             else:
-                console.print("[red]✗[/red]  MCP server is required", style="bold red")
-                raise RuntimeError(
-                    "MCP server is required. Please launch it manually or allow automatic launch."
+                console.print(
+                    "[green]✓[/green]  MCP server will be embedded in FastAPI app"
                 )
         else:
-            console.print(
-                f"[green]✓[/green]  MCP server is running on port [bold]{mcp_port}[/bold]"
-            )
+            # Check MCP server
+            mcp_port = getattr(cfg, "mcp_port", 8000)
+            if not check_port(mcp_port):
+                console.print(
+                    f"[yellow]⚠[/yellow]  MCP server is not running on port [bold]{mcp_port}[/bold]"
+                )
+                if Confirm.ask("Launch MCP server?"):
+                    process = launch_mcp_server(mcp_port, self.logger)
+                    if process:
+                        self._launched_processes.append(process)
+                        console.print(
+                            f"[green]✓[/green]  MCP server launched on port {mcp_port}"
+                        )
+                    else:
+                        console.print(
+                            "[red]✗[/red]  Failed to start MCP server", style="bold red"
+                        )
+                        raise RuntimeError(
+                            "Failed to start MCP server. Please launch it manually."
+                        )
+                else:
+                    console.print("[red]✗[/red]  MCP server is required", style="bold red")
+                    raise RuntimeError(
+                        "MCP server is required. Please launch it manually or allow automatic launch."
+                    )
+            else:
+                console.print(
+                    f"[green]✓[/green]  MCP server is running on port [bold]{mcp_port}[/bold]"
+                )
 
         # Check search agent vLLM server
         search_base_url = getattr(cfg, "search_agent_base_url", None)

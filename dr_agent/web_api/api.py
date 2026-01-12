@@ -215,6 +215,8 @@ def create_app(
     ui_mode: str = "auto",
     dev_url: Optional[str] = None,
     password: Optional[str] = None,
+    embed_mcp: bool = False,
+    mcp_path: str="/mcp"
 ) -> FastAPI:
     """
     Create a FastAPI app configured to serve the given workflow.
@@ -635,4 +637,13 @@ def create_app(
     except Exception as e:
         print(f"⚠ Failed to mount UI: {e}")
 
+    # Embed MCP if provided
+    if embed_mcp:
+        try:
+            from dr_agent.mcp_backend.main import mcp
+            mcp_app = mcp.http_app(path="/") # mount app
+            app.mount(mcp_path, mcp_app)
+            print(f"✓ MCP server embeded at {mcp_path}")
+        except Exception as e:
+            print(f"⚠ Failed to embed MCP: {e}")
     return app

@@ -1296,6 +1296,11 @@ class BaseWorkflow(ABC):
                 "-v",
                 help="Verbose output",
             ),
+            mcp_url: Optional[str] = typer.Option(
+                None,
+                "--mcp-url",
+                help="URL of the MCP server to embed",
+            ),
         ):
             """Start a live chat server for the workflow."""
             # Import web API dependencies here to avoid loading them when not needed
@@ -1338,6 +1343,12 @@ class BaseWorkflow(ABC):
                 logging.getLogger("LiteLLM").setLevel(logging.WARNING)
                 litellm.turn_off_message_logging = True
 
+            embed_mcp = mcp_url is None # embed MCP if not provided
+            
+            parsed_overrides["skip_mcp_check"] = True # skip MCP port check
+            if mcp_url:
+                parsed_overrides["mcp_url"] = mcp_url
+
             # Initialize workflow
             cls.__logger__.info("Initializing workflow...")
             workflow = cls(configuration=config_file, **parsed_overrides)
@@ -1345,8 +1356,13 @@ class BaseWorkflow(ABC):
 
             # Create FastAPI app
             fastapi_app = create_app(
-                workflow, ui_mode=ui_mode, password=password, dev_url=dev_url
+                workflow, ui_mode=ui_mode, password=password, dev_url=dev_url, embed_mcp=embed_mcp
             )
+            
+            if embed_mcp:
+                cls.__logger__.info(f"MCP server embeded")
+            else:
+                cls.__logger__.info("Using external MCP server: {mcp_url}")
 
             # Start server
             url = (
