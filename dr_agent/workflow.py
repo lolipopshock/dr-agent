@@ -1346,7 +1346,9 @@ class BaseWorkflow(ABC):
             embed_mcp = mcp_url is None # embed MCP if not provided
             
             parsed_overrides["skip_mcp_check"] = True # skip MCP port check
-            if mcp_url:
+            if embed_mcp:
+                parsed_overrides["mcp_url"] = f"http://localhost:{port}/mcp" # set endpoint to /mcp
+            else:
                 parsed_overrides["mcp_url"] = mcp_url
 
             # Initialize workflow
