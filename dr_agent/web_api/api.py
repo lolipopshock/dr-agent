@@ -11,7 +11,7 @@ import re
 import secrets
 from typing import Any, Dict, List, Optional
 
-from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, status
+from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     HTMLResponse,
@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from ..tool_interface.data_types import DocumentToolOutput, ToolOutput
 from ..workflow import BaseWorkflow
+from .jobs import JobManager
 
 
 class Message(BaseModel):
@@ -248,6 +249,9 @@ def create_app(
             print(f"⚠ Failed to create MCP app: {e}")
 
     app = FastAPI(title="DR-Agent Chat API", lifespan=mcp_lifespan)
+
+    # Initialize job manager
+    app.state.job_manager = JobManager()
 
     # Store workflow in app state
     app.state.workflow = workflow_instance
@@ -620,6 +624,97 @@ def create_app(
                 "X-Accel-Buffering": "no",  # Disable nginx buffering
             },
         )
+
+    @app.post("/chat/background")
+    async def chat_background(request: ChatRequest, _: bool = Depends(verify_auth)):
+        job_id = await app.state.job_manager.submit( # submit job
+            app.state.workflow,
+            problem=request.content or "",
+            dataset_name=request.dataset_name,
+            messages=[{"role": m.role, "content": m.content} for m in request.messages] if request.messages else None,
+            verbose=False,
+        )
+        return {"job_id": job_id, "status": "queued"}
+
+    @app.websocket("/chat/background/ws")
+    async def chat_background_ws(websocket: WebSocket):
+        """
+        WebSocket endpoint for background job execution
+        
+        Flow:
+         - Client connects
+         - Client sends chat request
+         - Server sends started acknowledgment
+         - Server sends completion status
+        """
+        await websocket.accept()
+        
+        try:
+            # Receive request from client
+            data = await websocket.receive_json()
+            content = data.get("content", "")
+            dataset_name = data.get("dataset_name", "long_form")
+            messages = data.get("messages")
+            
+            messages_dicts = None
+            if messages:
+                messages_dicts = [{"role": m["role"], "content": m["content"]} for m in messages]
+                if not content:
+                    for m in reversed(messages_dicts):
+                        if m["role"] == "user":
+                            content = m["content"]
+                            break
+            
+            # Submit job
+            job_id = await app.state.job_manager.submit(
+                app.state.workflow,
+                problem=content,
+                dataset_name=dataset_name,
+                messages=messages_dicts,
+                verbose=False,
+            )
+            
+            # Subscribe to updates
+            queue = app.state.job_manager.subscribe(job_id)
+            
+            # Promise 1: started acknowledgment
+            await websocket.send_json({"type": "started", "job_id": job_id})
+            
+            # Promise 2: wait for completion
+            while True:
+                update = await queue.get()
+                if update["status"] == "running":
+                    await websocket.send_json({"type": "running", "job_id": job_id})
+                elif update["status"] == "completed":
+                    # parse exact fields from raw results
+                    raw_result = update.get("result") or {}
+                    result = {
+                        "response": raw_result.get("final_response", ""),
+                        "metadata": {
+                            "total_tool_calls": raw_result.get("total_tool_calls", 0),
+                            "failed_tool_calls": raw_result.get("total_failed_tool_calls", 0),
+                            "browsed_links": raw_result.get("browsed_links", []),
+                            "searched_links": raw_result.get("searched_links", []),
+                        },
+                    }
+                    await websocket.send_json({"type": "completed", "result": result})
+                    break
+                elif update["status"] == "failed":
+                    await websocket.send_json({"type": "failed", "error": update.get("error")})
+                    break
+            
+            app.state.job_manager.unsubscribe(job_id, queue)
+            
+        except WebSocketDisconnect: # job continues even if client disconnects
+            pass
+
+    @app.get("/jobs/{job_id}")
+    async def get_job(job_id: str):
+        """Get job status"""
+        job = app.state.job_manager.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        return job
 
     @app.get("/health")
     async def health_check():
