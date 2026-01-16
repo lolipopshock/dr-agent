@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import subprocess
+import re
 import weakref
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -160,6 +161,16 @@ class BaseWorkflow(ABC):
 
     __logger__ = logging.getLogger(__name__)
     __logger__.setLevel(logging.INFO)
+
+    @classmethod
+    def get_workflow_name(cls) -> str:
+        """Make workflow name URL-safe from class name"""
+        name = cls.__name__
+        for s in ('Workflow', 'Agent', 'Pipeline'): # check suffixes
+            if name.endswith(s):
+                name = name[:-len(s)]
+                break
+        return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower() # replace with underscore
 
     @property
     @abstractmethod

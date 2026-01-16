@@ -11,7 +11,7 @@ import re
 import secrets
 from typing import Any, Dict, List, Optional
 
-from fastapi import Cookie, Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Cookie, Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     HTMLResponse,
@@ -209,6 +209,89 @@ class SSECallback:
             self.current_segment_text = ""
             self.is_answering = False
             self.thinking_segment_id += 1
+
+
+def create_workflow_router(workflow_instance: BaseWorkflow) -> APIRouter:
+    """Create an FastAPI router with chat endpoints for a workflow instance"""
+    router = APIRouter()
+    job_manager = JobManager()
+    
+    async def run_workflow_streaming(content: str, dataset_name: str, queue: asyncio.Queue, messages=None):
+        callback = SSECallback(queue) # callback for SSE events
+        await queue.put(f'data: {{"type": "started"}}\n\n')
+        result = await workflow_instance(problem=content, dataset_name=dataset_name, messages=messages, verbose=False, step_callback=callback)
+        if final := result.get("final_response"): # finial response
+            await queue.put(f'data: {json.dumps({"type": "answer", "content": final, "is_final": True})}\n\n')
+        await queue.put(f'data: {json.dumps({"type": "done", "metadata": {"total_tool_calls": result.get("total_tool_calls", 0)}})}\n\n')
+        await queue.put(None)
+    
+    @router.post("/chat")
+    async def chat(request: ChatRequest):
+        msgs = [{"role": m.role, "content": m.content} for m in request.messages] if request.messages else None
+        content = request.content or (msgs[-1]["content"] if msgs else "")
+        result = await workflow_instance(problem=content, dataset_name=request.dataset_name, messages=msgs, verbose=False)
+        return {"response": result.get("final_response", ""), "metadata": {"total_tool_calls": result.get("total_tool_calls", 0)}}
+    
+    @router.post("/chat/stream")
+    async def chat_stream(request: ChatRequest):
+        queue = asyncio.Queue()
+        msgs = [{"role": m.role, "content": m.content} for m in request.messages] if request.messages else None
+        content = request.content or (msgs[-1]["content"] if msgs else "")
+        
+        async def gen():
+            task = asyncio.create_task(run_workflow_streaming(content, request.dataset_name, queue, msgs))
+            try:
+                while (event := await queue.get()) is not None:
+                    yield event
+            except asyncio.CancelledError:
+                task.cancel()
+                raise
+        return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    
+    @router.post("/chat/background")
+    async def chat_background(request: ChatRequest): # background job
+        job_id = await job_manager.submit(workflow_instance, problem=request.content or "", dataset_name=request.dataset_name, messages=[{"role": m.role, "content": m.content} for m in request.messages] if request.messages else None, verbose=False)
+        return {"job_id": job_id, "status": "queued"}
+    
+    @router.websocket("/chat/background/ws")
+    async def chat_background_ws(websocket: WebSocket):
+        """WebSocket endpoint for background job execution with live updates"""
+        await websocket.accept()
+        try:
+            data = await websocket.receive_json()
+            content = data.get("content", "")
+            dataset_name = data.get("dataset_name", "long_form")
+            messages = data.get("messages")
+            msgs = [{"role": m["role"], "content": m["content"]} for m in messages] if messages else None
+            if not content and msgs:
+                content = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
+            
+            job_id = await job_manager.submit(workflow_instance, problem=content, dataset_name=dataset_name, messages=msgs, verbose=False)
+            queue = job_manager.subscribe(job_id)
+            await websocket.send_json({"type": "started", "job_id": job_id})
+            
+            while True:
+                update = await queue.get()
+                if update["status"] == "running":
+                    await websocket.send_json({"type": "running", "job_id": job_id})
+                elif update["status"] == "completed":
+                    raw = update.get("result") or {}
+                    await websocket.send_json({"type": "completed", "result": {"response": raw.get("final_response", ""), "metadata": {"total_tool_calls": raw.get("total_tool_calls", 0)}}})
+                    break
+                elif update["status"] == "failed":
+                    await websocket.send_json({"type": "failed", "error": update.get("error")})
+                    break
+            job_manager.unsubscribe(job_id, queue)
+        except WebSocketDisconnect:
+            pass
+    
+    @router.get("/jobs/{job_id}")
+    async def get_job(job_id: str):
+        if job := job_manager.get(job_id):
+            return job
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    return router
 
 
 def create_app(
