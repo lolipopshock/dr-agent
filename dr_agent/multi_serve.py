@@ -44,7 +44,13 @@ def load_workflow(path: str) -> Type[BaseWorkflow]:
     raise ValueError(f"No BaseWorkflow subclass in {file_path}")
 
 
-def create_multi_app(workflows: List[BaseWorkflow], mcp_port: int = 8080) -> FastAPI:
+def create_multi_app(
+    workflows: List[BaseWorkflow],
+    workflow_names: List[str],
+    mcp_port: int = 8080,
+    ui_mode: str = "auto",
+    dev_url: Optional[str] = None,
+) -> FastAPI:
     """Create FastAPI app serving multiple workflows."""
     mcp_lifespan = None
     mcp_app = None
@@ -59,8 +65,7 @@ def create_multi_app(workflows: List[BaseWorkflow], mcp_port: int = 8080) -> Fas
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
     
     workflow_info = [] # list of workflows
-    for wf in workflows:
-        name = wf.get_workflow_name()
+    for wf, name in zip(workflows, workflow_names):
         app.include_router(create_workflow_router(wf), prefix=f"/agent/{name}", tags=[name])
         workflow_info.append({"name": name, "class": wf.__class__.__name__})
     
@@ -75,6 +80,19 @@ def create_multi_app(workflows: List[BaseWorkflow], mcp_port: int = 8080) -> Fas
     if mcp_app:
         app.mount("/mcp", mcp_app)
     
+    # Mount UI
+    try:
+        from dr_agent_ui.server import mount_ui
+        ui_mounted = mount_ui(app, ui_mode=ui_mode, dev_url=dev_url)
+        if ui_mounted:
+            print(f"UI mounted successfully in '{ui_mode}' mode")
+        else:
+            print(f"UI not mounted (mode: {ui_mode}). API endpoints are available.")
+    except ImportError:
+        print("dr_agent_ui not installed. Run: pip install dr-agent-ui")
+    except Exception as e:
+        print(f"Failed to mount UI: {e}")
+    
     return app
 
 
@@ -84,9 +102,12 @@ def serve(
     port: int = typer.Option(8080, "--port", "-p"),
     host: str = typer.Option("0.0.0.0", "--host"),
     config: Optional[str] = typer.Option(None, "--config", "-c", help="Config file (applies to all workflows)"),
+    ui_mode: str = typer.Option("auto", "--ui-mode", help="UI mode: auto, precompiled, dev, or proxy"),
+    dev_url: Optional[str] = typer.Option(None, "--dev-url", help="Dev server URL (for proxy mode)"),
 ):
     """Serve multiple workflows from one server."""
     workflows = []
+    workflow_names = []  # track names in order
     names = set()
     
     for spec in workflow_paths:
@@ -115,13 +136,13 @@ def serve(
             skip_mcp_check=True,
             mcp_url=f"http://localhost:{port}/mcp/",
         ))
+        workflow_names.append(name)
         print(f"✓ {cls.__name__} → /agent/{name}/ ({Path(config_path).name if config_path else 'default'})")
     
-    app = create_multi_app(workflows, mcp_port=port)
+    app = create_multi_app(workflows, workflow_names, mcp_port=port, ui_mode=ui_mode, dev_url=dev_url)
     
     print(f"\n{'='*50}\nServing at http://localhost:{port}")
-    for wf in workflows:
-        name = wf.get_workflow_name()
+    for name in workflow_names:
         print(f"   POST /agent/{name}/chat")
         print(f"   POST /agent/{name}/chat/stream")
         print(f"   POST /agent/{name}/chat/background")

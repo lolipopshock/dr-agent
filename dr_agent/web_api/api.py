@@ -214,7 +214,9 @@ class SSECallback:
 def create_workflow_router(workflow_instance: BaseWorkflow) -> APIRouter:
     """Create an FastAPI router with chat endpoints for a workflow instance"""
     router = APIRouter()
-    job_manager = JobManager()
+    # workflow-specific database path for job persistence
+    workflow_name = workflow_instance.get_workflow_name()
+    job_manager = JobManager(db_path=f".cache/jobs_{workflow_name}.db")
     
     async def run_workflow_streaming(content: str, dataset_name: str, queue: asyncio.Queue, messages=None):
         callback = SSECallback(queue) # callback for SSE events
