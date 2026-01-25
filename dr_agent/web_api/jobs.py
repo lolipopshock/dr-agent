@@ -119,6 +119,7 @@ class JobManager:
             "updated_at": now,
         }
         self._add_to_cache(job_id, job)
+        self._persist_job(job_id, job)
         self._subscribers[job_id] = []  # initially no subscribers
 
         async def run():
