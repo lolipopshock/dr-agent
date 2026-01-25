@@ -189,7 +189,13 @@ class AnswerAgent(BaseAgent):
         elif dataset_name in ["healthbench", "deep_research_bench", "researchqa"]:
             instruction_field_name = "short_form"
         else:
-            raise ValueError(f"Invalid dataset name: {dataset_name}")
+            # Fallback: check if dataset_name contains hints
+            if "short_form" in str(dataset_name):
+                instruction_field_name = "exact_answer"
+            elif "long_form" in str(dataset_name):
+                instruction_field_name = "long_form"
+            else:
+                raise ValueError(f"Invalid dataset name: {dataset_name}")
 
         return [
             {

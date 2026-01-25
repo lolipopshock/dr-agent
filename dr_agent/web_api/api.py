@@ -281,6 +281,9 @@ def create_workflow_router(workflow_instance: BaseWorkflow) -> APIRouter:
                 elif update["status"] == "failed":
                     await websocket.send_json({"type": "failed", "error": update.get("error")})
                     break
+                elif update["status"] == "cancelled":
+                    await websocket.send_json({"type": "cancelled", "job_id": job_id})
+                    break
             job_manager.unsubscribe(job_id, queue)
         except WebSocketDisconnect:
             pass
@@ -290,6 +293,12 @@ def create_workflow_router(workflow_instance: BaseWorkflow) -> APIRouter:
         if job := job_manager.get(job_id):
             return job
         raise HTTPException(status_code=404, detail="Job not found")
+
+    @router.post("/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str):
+        if await job_manager.cancel(job_id):
+            return {"status": "cancelled", "job_id": job_id}
+        raise HTTPException(status_code=404, detail="Job not found or already completed")
     
     return router
 
@@ -785,6 +794,9 @@ def create_app(
                 elif update["status"] == "failed":
                     await websocket.send_json({"type": "failed", "error": update.get("error")})
                     break
+                elif update["status"] == "cancelled":
+                    await websocket.send_json({"type": "cancelled", "job_id": job_id})
+                    break
             
             app.state.job_manager.unsubscribe(job_id, queue)
             
@@ -798,6 +810,13 @@ def create_app(
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
         return job
+
+    @app.post("/jobs/{job_id}/cancel")
+    async def cancel_job(job_id: str, _: bool = Depends(verify_auth)):
+        """Cancel a running job"""
+        if await app.state.job_manager.cancel(job_id):
+            return {"status": "cancelled", "job_id": job_id}
+        raise HTTPException(status_code=404, detail="Job not found or it might have already completed")
 
     @app.get("/health")
     async def health_check():

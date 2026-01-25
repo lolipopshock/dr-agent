@@ -28,12 +28,26 @@ class JobManager:
                 result = await fn(**kwargs)
                 self._jobs[job_id].update(status="completed", result=result)
                 await self._notify(job_id, "completed", result=result)
+            except asyncio.CancelledError:
+                self._jobs[job_id].update(status="cancelled")
+                await self._notify(job_id, "cancelled")
+                raise
             except Exception as e:
                 self._jobs[job_id].update(status="failed", error=str(e))
                 await self._notify(job_id, "failed", error=str(e))
+            finally:
+                self._tasks.pop(job_id, None)
 
         self._tasks[job_id] = asyncio.create_task(run())
         return job_id
+
+    async def cancel(self, job_id: str) -> bool:
+        """Cancel a running job. Returns True if cancelled, else False."""
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return False
 
     async def _notify(self, job_id, status, **data):
         """Push status change to all subscribers."""
