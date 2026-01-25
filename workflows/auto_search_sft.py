@@ -189,7 +189,13 @@ class AnswerAgent(BaseAgent):
         elif dataset_name in ["healthbench", "deep_research_bench", "researchqa"]:
             instruction_field_name = "short_form"
         else:
-            raise ValueError(f"Invalid dataset name: {dataset_name}")
+            # Fallback: check if dataset_name contains hints
+            if "short_form" in str(dataset_name):
+                instruction_field_name = "exact_answer"
+            elif "long_form" in str(dataset_name):
+                instruction_field_name = "long_form"
+            else:
+                raise ValueError(f"Invalid dataset name: {dataset_name}")
 
         return [
             {
@@ -291,6 +297,8 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
         mcp_transport_type: str = "StreamableHttpTransport"
         mcp_executable: Optional[str] = None
         mcp_port: int = 8000
+        mcp_url: Optional[str] = None
+        skip_mcp_check: bool = False
 
         # Search configuration
         number_documents_to_search: int = 10
@@ -318,35 +326,49 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
         console.print(Panel.fit("🔍 Service Check", style="bold cyan"))
         console.print()
 
-        # Check MCP server
-        mcp_port = getattr(cfg, "mcp_port", 8000)
-        if not check_port(mcp_port):
-            console.print(
-                f"[yellow]⚠[/yellow]  MCP server is not running on port [bold]{mcp_port}[/bold]"
-            )
-            if Confirm.ask("Launch MCP server?"):
-                process = launch_mcp_server(mcp_port, self.logger)
-                if process:
-                    self._launched_processes.append(process)
-                    console.print(
-                        f"[green]✓[/green]  MCP server launched on port {mcp_port}"
-                    )
-                else:
-                    console.print(
-                        "[red]✗[/red]  Failed to start MCP server", style="bold red"
-                    )
-                    raise RuntimeError(
-                        "Failed to start MCP server. Please launch it manually."
-                    )
+        # Check whether to skip MCP check 
+        skip_mcp_check = getattr(cfg, "skip_mcp_check", False)
+
+        if skip_mcp_check:
+            mcp_url = getattr(cfg, "mcp_url", None)
+            if mcp_url:
+                console.print(
+                    f"[green]✓[/green]  Using external MCP server: [bold]{mcp_url}[/bold]"
+                )
             else:
-                console.print("[red]✗[/red]  MCP server is required", style="bold red")
-                raise RuntimeError(
-                    "MCP server is required. Please launch it manually or allow automatic launch."
+                console.print(
+                    "[green]✓[/green]  MCP server will be embedded in FastAPI app"
                 )
         else:
-            console.print(
-                f"[green]✓[/green]  MCP server is running on port [bold]{mcp_port}[/bold]"
-            )
+            # Check MCP server
+            mcp_port = getattr(cfg, "mcp_port", 8000)
+            if not check_port(mcp_port):
+                console.print(
+                    f"[yellow]⚠[/yellow]  MCP server is not running on port [bold]{mcp_port}[/bold]"
+                )
+                if Confirm.ask("Launch MCP server?"):
+                    process = launch_mcp_server(mcp_port, self.logger)
+                    if process:
+                        self._launched_processes.append(process)
+                        console.print(
+                            f"[green]✓[/green]  MCP server launched on port {mcp_port}"
+                        )
+                    else:
+                        console.print(
+                            "[red]✗[/red]  Failed to start MCP server", style="bold red"
+                        )
+                        raise RuntimeError(
+                            "Failed to start MCP server. Please launch it manually."
+                        )
+                else:
+                    console.print("[red]✗[/red]  MCP server is required", style="bold red")
+                    raise RuntimeError(
+                        "MCP server is required. Please launch it manually or allow automatic launch."
+                    )
+            else:
+                console.print(
+                    f"[green]✓[/green]  MCP server is running on port [bold]{mcp_port}[/bold]"
+                )
 
         # Check search agent vLLM server
         search_base_url = getattr(cfg, "search_agent_base_url", None)
@@ -435,10 +457,10 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
         mcp_transport_type: Optional[str] = "StreamableHttpTransport",
         mcp_executable: Optional[str] = None,
         mcp_port: Optional[int] = 8000,
+        mcp_url: Optional[str] = None
     ) -> None:
         cfg = self.configuration
         assert cfg is not None
-        # print(cfg)
 
         # Allow configuration overrides for MCP settings
         if getattr(cfg, "mcp_transport_type", None):
@@ -447,6 +469,14 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
             mcp_executable = cfg.mcp_executable
         if getattr(cfg, "mcp_port", None) is not None:
             mcp_port = cfg.mcp_port
+        if getattr(cfg, "mcp_url", None):
+            mcp_url = cfg.mcp_url
+
+        mcp_kwargs = {"transport_type": mcp_transport_type, "mcp_executable": mcp_executable}
+        if mcp_url: # first check url
+            mcp_kwargs["mcp_url"] = mcp_url
+        else:
+            mcp_kwargs["mcp_port"] = mcp_port
 
         # Search and browse tools (MCP-backed) with unified tool parser
         if cfg.search_tool_name == "serper":
@@ -455,9 +485,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="snippet_search",  # <- to test this v20250824 model, we need to set the tool name in a hacky way.
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
 
             self.search_tool2 = SerperSearchTool(
@@ -465,9 +493,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="google_search",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
         elif cfg.search_tool_name == "s2":
             self.search_tool = SemanticScholarSnippetSearchTool(
@@ -475,9 +501,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="snippet_search",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
 
             self.search_tool2 = SerperSearchTool(
@@ -485,9 +509,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="google_search",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
         elif cfg.search_tool_name == "s2-only":
             self.search_tool = SemanticScholarSnippetSearchTool(
@@ -495,9 +517,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="snippet_search",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
 
             self.search_tool2 = SemanticScholarSnippetSearchTool(
@@ -505,9 +525,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 number_documents_to_search=cfg.number_documents_to_search,
                 timeout=cfg.search_timeout,
                 name="google_search",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
         else:
             raise ValueError(f"Invalid search tool name: {cfg.search_tool_name}")
@@ -518,9 +536,7 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 max_pages_to_fetch=cfg.browse_max_pages_to_fetch,
                 timeout=cfg.browse_timeout,
                 name="browse_webpage",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
         elif cfg.browse_tool_name == "crawl4ai":
             self.browse_tool = Crawl4AIBrowseTool(
@@ -528,21 +544,17 @@ class AutoReasonSearchWorkflow(BaseWorkflow):
                 max_pages_to_fetch=cfg.browse_max_pages_to_fetch,
                 timeout=cfg.browse_timeout,
                 name="browse_webpage",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
                 context_chars=cfg.browse_context_char_length,
                 use_docker_version=cfg.crawl4ai_use_docker_version,
                 use_ai2_config=cfg.crawl4ai_use_ai2_config,
+                **mcp_kwargs,
             )
         elif cfg.browse_tool_name == "jina":
             self.browse_tool = JinaBrowseTool(
                 tool_parser=cfg.tool_parser,
                 timeout=cfg.browse_timeout,
                 name="browse_webpage",
-                transport_type=mcp_transport_type,
-                mcp_executable=mcp_executable,
-                mcp_port=mcp_port,
+                **mcp_kwargs,
             )
         elif cfg.browse_tool_name is None:
             self.browse_tool = NoBrowseTool(
