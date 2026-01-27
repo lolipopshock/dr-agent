@@ -215,6 +215,8 @@ def create_app(
     ui_mode: str = "auto",
     dev_url: Optional[str] = None,
     password: Optional[str] = None,
+    embed_mcp: bool = False,
+    mcp_path: str="/mcp"
 ) -> FastAPI:
     """
     Create a FastAPI app configured to serve the given workflow.
@@ -234,7 +236,18 @@ def create_app(
     Returns:
         Configured FastAPI application
     """
-    app = FastAPI(title="DR-Agent Chat API")
+    # Create MCP app first if embedded
+    mcp_app = None
+    mcp_lifespan = None
+    if embed_mcp:
+        try:
+            from dr_agent.mcp_backend.main import mcp
+            mcp_app = mcp.http_app(path="/")
+            mcp_lifespan = mcp_app.lifespan
+        except Exception as e:
+            print(f"⚠ Failed to create MCP app: {e}")
+
+    app = FastAPI(title="DR-Agent Chat API", lifespan=mcp_lifespan)
 
     # Store workflow in app state
     app.state.workflow = workflow_instance
@@ -617,6 +630,11 @@ def create_app(
             "ui_mode": ui_mode,
             "endpoints": ["/chat", "/chat/stream"],
         }
+
+    # Mount MCP before UI
+    if embed_mcp and mcp_app:
+        app.mount(mcp_path, mcp_app)
+        print(f"✓ MCP server embedded at {mcp_path}")
 
     # Mount UI files if available
     try:
